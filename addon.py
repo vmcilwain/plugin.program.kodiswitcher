@@ -9,6 +9,7 @@ import xbmcgui
 import xbmcvfs
 import os
 import sys
+import subprocess
 
 ADDON = xbmcaddon.Addon()
 ADDON_NAME = ADDON.getAddonInfo('name')
@@ -38,22 +39,11 @@ def get_kodi_directories():
         dirs, files = xbmcvfs.listdir(ROOT_DIR)
         
         for directory in dirs:
-            dir_path = os.path.join(ROOT_DIR, directory)
-            
-            addons_path = os.path.join(dir_path, 'addons')
-            userdata_path = os.path.join(dir_path, 'userdata')
-            
-            if xbmcvfs.exists(addons_path) or xbmcvfs.exists(userdata_path):
+            dir_lower = directory.lower()
+            if 'kodi' in dir_lower or 'xbmc' in dir_lower or 'build' in dir_lower:
                 kodi_dirs.append(directory)
                 log('Found Kodi directory: {0}'.format(directory))
-        
-        for directory in dirs:
-            if directory not in kodi_dirs:
-                dir_lower = directory.lower()
-                if 'kodi' in dir_lower or 'xbmc' in dir_lower or 'build' in dir_lower:
-                    kodi_dirs.append(directory)
-                    log('Found potential Kodi directory: {0}'.format(directory))
-        
+
     except Exception as e:
         log('Error scanning directories: {0}'.format(str(e)), xbmc.LOGERROR)
     
@@ -106,19 +96,101 @@ def write_env_file(data_path):
         return False
 
 
+def get_directory_name_from_keyboard():
+    """
+    Show keyboard input to get a directory name from the user
+    Returns the directory name or None if cancelled
+    """
+    try:
+        keyboard = xbmc.Keyboard('', 'Enter directory name')
+        keyboard.doModal()
+        
+        if keyboard.isConfirmed():
+            directory_name = keyboard.getText().strip()
+            if directory_name:
+                log('User entered directory name: {0}'.format(directory_name))
+                return directory_name
+        
+        log('User cancelled directory name input')
+        return None
+    except Exception as e:
+        log('Error in get_directory_name_from_keyboard: {0}'.format(str(e)), xbmc.LOGERROR)
+        return None
+
+
+def create_new_build_directory(directory_name):
+    """
+    Create a new directory with .kodi subfolder inside
+    Returns the directory name if successful, None otherwise
+    """
+    try:
+        # Sanitize directory name (remove problematic characters)
+        directory_name = directory_name.replace('/', '_').replace('\\', '_').strip()
+        
+        if not directory_name:
+            xbmcgui.Dialog().ok(
+                ADDON_NAME,
+                'Invalid directory name',
+                'Please enter a valid directory name.'
+            )
+            return None
+        
+        new_dir_path = os.path.join(ROOT_DIR, directory_name)
+        kodi_subdir_path = os.path.join(new_dir_path, '.kodi')
+        
+        # Check if directory already exists
+        if xbmcvfs.exists(new_dir_path):
+            xbmcgui.Dialog().ok(
+                ADDON_NAME,
+                'Directory already exists',
+                'A directory named "{0}" already exists.'.format(directory_name)
+            )
+            return None
+        
+        # Create the main directory
+        try:
+            xbmcvfs.mkdirs(new_dir_path)
+            log('Created directory: {0}'.format(new_dir_path))
+        except Exception as e:
+            log('Error creating directory: {0}'.format(str(e)), xbmc.LOGERROR)
+            xbmcgui.Dialog().ok(
+                ADDON_NAME,
+                'Failed to create directory',
+                'Error: {0}'.format(str(e))
+            )
+            return None
+        
+        # Create the .kodi subdirectory
+        try:
+            xbmcvfs.mkdirs(kodi_subdir_path)
+            log('Created .kodi subdirectory: {0}'.format(kodi_subdir_path))
+        except Exception as e:
+            log('Error creating .kodi subdirectory: {0}'.format(str(e)), xbmc.LOGERROR)
+            xbmcgui.Dialog().ok(
+                ADDON_NAME,
+                'Failed to create .kodi subdirectory',
+                'Directory created but .kodi subdirectory failed: {0}'.format(str(e))
+            )
+            return None
+        
+        log('Successfully created build directory: {0}'.format(directory_name))
+        return directory_name
+    except Exception as e:
+        log('Error in create_new_build_directory: {0}'.format(str(e)), xbmc.LOGERROR)
+        xbmcgui.Dialog().ok(
+            ADDON_NAME,
+            'Error creating build directory',
+            str(e)
+        )
+        return None
+
+
 def show_build_selector():
     """
     Display a dialog with available Kodi builds and allow user to select one
     """
     try:
         kodi_dirs = get_kodi_directories()
-        
-        if not kodi_dirs:
-            xbmcgui.Dialog().ok(
-                ADDON_NAME,
-                'No Kodi build directories found in /sdcard/\n\nPlease ensure your build directories are in the root of your device storage.'
-            )
-            return None
         
         current_location = get_current_location()
         current_dir = None
@@ -132,16 +204,36 @@ def show_build_selector():
             else:
                 display_list.append(directory)
         
-        dialog = xbmcgui.Dialog()
-        selected_index = dialog.select(
-            '{0} - Select Build'.format(ADDON_NAME),
-            display_list
-        )
+        # Add "Create New Build" option at the bottom
+        display_list.append('+ Create New Build')
         
-        if selected_index >= 0:
-            selected_dir = kodi_dirs[selected_index]
-            log('User selected: {0}'.format(selected_dir))
-            return selected_dir
+        if not display_list or (len(display_list) == 1 and display_list[0] == '+ Create New Build'):
+            # Only create option available
+            dialog = xbmcgui.Dialog()
+            selected_index = dialog.select(
+                '{0} - Select Build'.format(ADDON_NAME),
+                display_list
+            )
+            
+            if selected_index >= 0:
+                if selected_index == len(display_list) - 1:
+                    return 'CREATE_NEW'
+            return None
+        else:
+            dialog = xbmcgui.Dialog()
+            selected_index = dialog.select(
+                '{0} - Select Build'.format(ADDON_NAME),
+                display_list
+            )
+            
+            if selected_index >= 0:
+                # Check if user selected "Create New Build"
+                if selected_index == len(display_list) - 1:
+                    return 'CREATE_NEW'
+                else:
+                    selected_dir = kodi_dirs[selected_index]
+                    log('User selected: {0}'.format(selected_dir))
+                    return selected_dir
         
         return None
     except Exception as e:
@@ -218,6 +310,9 @@ def show_quit_method_selector():
         except:
             pass
         return None
+
+
+def force_quit_kodi():
     """
     Force quit Kodi application
     On Android, we need to kill the process for xbmc_env.properties to take effect
@@ -264,6 +359,23 @@ def main():
         if selected_build is None:
             log('No build selected, exiting')
             return
+        
+        # Handle new build creation
+        if selected_build == 'CREATE_NEW':
+            log('User selected to create new build')
+            
+            directory_name = get_directory_name_from_keyboard()
+            if directory_name is None:
+                log('User cancelled directory name input')
+                return
+            
+            created_build = create_new_build_directory(directory_name)
+            if created_build is None:
+                log('Failed to create build directory')
+                return
+            
+            selected_build = created_build
+            log('Created new build: {0}'.format(created_build))
         
         if not confirm_switch(selected_build):
             log('User cancelled switch')
